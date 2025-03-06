@@ -3,161 +3,154 @@ module poc (
     input  wire        clk,    // System clock
     input  wire        rst_n,  // Active low reset
     
-    output reg irq,
+    output reg irq,            // Interrupt request (active low)
     
-    input wire [7:0]data_in,
-
-    input wire rw,// 1 for write, 0 for read
-    input wire reg_in,
-    output reg reg_out,
-    input wire [2:0]addr,
-
-    input wire print_ready,
-    output reg [7:0]print_data,
-    output reg pulse_request
+    input wire [7:0]data_in,   // Data from CPU
     
+    input wire rw,             // 1 for write, 0 for read
+    input wire reg_in,         // Input bit for register write
+    output reg reg_out,        // Output bit for register read
+    input wire [2:0]addr,      // Register address
+    
+    input wire print_ready,    // Printer ready signal
+    output reg [7:0]print_data, // Data to printer
+    output reg pulse_request   // Pulse request to printer
 );
     
-
-    reg status_reg[7:0]=8'b10000000;
+    // Status register (8-bit)
+    reg [7:0] status_reg = 8'b10000000;
+    reg status_reg_next;
+    
     // Register R/W logic
-    // mutable registers [status_reg],[reg_out]
     always @(posedge clk or negedge rst_n) begin
-        if(~rst_n)begin
-            status_reg <= 8'b10000000;
+        if(~rst_n) begin
+            status_reg <= 8'b10000000;  // Reset status, POC ready
             reg_out <= 1'b0;
         end
         else begin
             // if the CPU requires to write
             if(rw) begin
-                status_reg[addr] <= reg_in;
-                reg_out<=reg_out;
+                // Write to status register based on address
+                case(addr)
+                    3'b000: status_reg[0] <= reg_in;  // SR0: mode control
+                    3'b111: status_reg[7] <= reg_in;  // SR7: ready flag
+                    default: ; // Other addresses not used for status
+                endcase
+                reg_out <= reg_out;  // No change during write
+            end
             // if the CPU requires to read
             else begin
-                status_reg[7] <= status_reg_next;
-                reg_out <= status_reg[addr];
-            end
+                status_reg[7] <= status_reg_next;  // Update ready status
+                reg_out <= status_reg[addr];       // Output requested register bit
             end
         end
     end
 
-    // Regesters Alias
-    localparam polling = 1'b1;
-    localparam interupt = 1'b0;
+    // Registers Alias - corrected as per spec
+    localparam polling = 1'b0;   // Polling mode when SR0=0
+    localparam interrupt = 1'b1; // Interrupt mode when SR0=1
     wire mode;
     assign mode = status_reg[0];
     
-    localparam poc_ready=1'b1;
-    localparam poc_busy=1'b0;
+    localparam poc_ready = 1'b1;
+    localparam poc_busy = 1'b0;
     wire ready;
-    assign ready= status_reg[7];
+    assign ready = status_reg[7];
     
     // Read in and print request controls
-    // Mutable registers:[print_request], [byte_buffer], [irq]
-    reg [7:0]byte_buffer=8'b0;
-    reg print_request=1'b0;
-    reg int_request=1'b0;
+    reg [7:0] byte_buffer = 8'b0;
+    reg print_request = 1'b0;
+    
     always @(posedge clk or negedge rst_n) begin
         if(~rst_n) begin
-            print_request<=1'b0;
-            byte_buffer<=8'b0;
-            irq<=1'b1;
+            print_request <= 1'b0;
+            byte_buffer <= 8'b0;
+            irq <= 1'b1;  // Active low, initialized inactive
         end
         else begin
-            // if in polling mode
+            // Polling mode (SR0 = 0)
             if(mode == polling) begin
-                // if in the polling mode, poc is ready
-                if(ready==poc_ready)begin
-                    print_request<=1'b0; 
-                    byte_buffer<=data_in;
-                    irq<=1'b1;
+                // POC is ready
+                if(ready == poc_ready) begin
+                    print_request <= 1'b0; 
+                    byte_buffer <= data_in;  // Store new data
+                    irq <= 1'b1;  // Keep IRQ inactive in polling mode
                 end
-                // if in the polling mode, poc is busy
+                // POC is busy
                 else begin
-                    // if in the polling mode, poc is ready, print is ready
                     if(print_ready) begin
-                        print_request<=1'b1;
-                        byte_buffer<=byte_buffer;
-                        irq<=1'b1;
+                        print_request <= 1'b1;  // Request to print
+                        byte_buffer <= byte_buffer;
+                        irq <= 1'b1;  // Keep IRQ inactive
                     end
-                    // if in the polling mode, poc is ready, print is busy
                     else begin
-                        print_request<=1'b0;
-                        byte_buffer<=byte_buffer;
-                        irq<=1'b1;
+                        print_request <= 1'b0;
+                        byte_buffer <= byte_buffer;
+                        irq <= 1'b1;
                     end
                 end
             end
-            // if in interupt mode
+            // Interrupt mode (SR0 = 1)
             else begin
-                // if in interupt mode, poc is ready
-                if(ready==poc_ready)begin
-                    print_request<=1'b0;
-                    byte_buffer<=data_in;
-                    irq<=print_ready==1'b1 ? 1'b0 : 1'b1;// if print is ready, send irq. if not, wait for printer.
+                // POC is ready
+                if(ready == poc_ready) begin
+                    print_request <= 1'b0;
+                    byte_buffer <= data_in;  // Store new data
+                    // If printer is ready, generate interrupt (active low)
+                    irq <= (print_ready == 1'b1) ? 1'b0 : 1'b1;
                 end
-                // if in interupt mode, poc is busy
+                // POC is busy
                 else begin
-                    // if in interupt mode, poc is busy, print is ready(only when printer is ready can enter this state)
-                    print_request<=1'b1;
-                    irq<=1'b1;// high level to clear the interrupt
-                    byte_buffer<=byte_buffer;
+                    print_request <= 1'b1;  // Request to print when printer ready
+                    irq <= 1'b1;  // Clear interrupt
+                    byte_buffer <= byte_buffer;
                 end
             end
         end
     end
     
+    // Printer state machine
+    localparam print_idle_state = 1'b0;
+    localparam print_busy_state = 1'b1;
+    reg print_state = print_idle_state;
     
-    
-
-    localparam print_idle_state=1'b0;
-    localparam pirnt_busy_state=1'b1;
-    reg print_state=print_idle_state;
-    reg pulse_request=1'b0;
-    reg status_reg_next=1'b1;
     // Printer Service FSM
-    // Mutable registers:[print_state], [print_data], [pulse_request], [status_reg_next]
     always @(posedge clk or negedge rst_n) begin
         if(~rst_n) begin
-            print_state<=print_idle_state;
-            print_data<=8'b0;
-            pulse_request<=1'b0;
-            status_reg_next<=1'b1;
+            print_state <= print_idle_state;
+            print_data <= 8'b0;
+            pulse_request <= 1'b0;
+            status_reg_next <= 1'b1;  // POC ready after reset
         end
         else begin
-            // if print is requested
-            if(print_request)begin
-                // if print is requested, printer is ready
-                if(print_ready)begin
-                    // if print is requested, printer is ready, printer state is idle
-                    if(print_state==print_idle_state)begin
-                        print_state<=pirnt_busy_state;
-                        print_data<=byte_buffer;
-                        pulse_request<=1'b1;
-                        status_reg_next<=status_reg_next;
-                    end
-                    // if print is requested, printer is ready, printer state is busy
-                    else begin
-                        print_state<=print_idle_state;
-                        print_data<=print_data;
-                        pulse_request<=1'b0;
-                        status_reg_next<=1'b1;
-                    end
+            // Print requested and printer ready
+            if(print_request && print_ready) begin
+                if(print_state == print_idle_state) begin
+                    print_state <= print_busy_state;
+                    print_data <= byte_buffer;     // Send data to printer
+                    pulse_request <= 1'b1;         // Generate pulse request
+                    status_reg_next <= poc_busy;   // POC is busy during printing
                 end
-                // if print is requested, printer is busy
-                else begin
-                    print_state<=print_state;
-                    print_data<=print_data;
-                    pulse_request<=1'b0;
-                    status_reg_next<=1'b0;
+                else begin  // print_state == print_busy_state
+                    print_state <= print_idle_state;
+                    print_data <= print_data;      // Keep data stable
+                    pulse_request <= 1'b0;         // End pulse
+                    status_reg_next <= poc_ready;  // POC becomes ready again
                 end
             end
-            // if print is not requested
+            // Print requested but printer not ready
+            else if(print_request && !print_ready) begin
+                print_state <= print_state;
+                print_data <= print_data;
+                pulse_request <= 1'b0;
+                status_reg_next <= poc_busy;  // POC stays busy
+            end
+            // No print request
             else begin
-                print_state<=print_idle_state;
-                print_data<=print_data;
-                pulse_request<=1'b0;
-                status_reg_next<=1'b0;
+                print_state <= print_idle_state;
+                print_data <= print_data;
+                pulse_request <= 1'b0;
+                status_reg_next <= poc_ready;  // POC is ready when no request
             end
         end
     end
