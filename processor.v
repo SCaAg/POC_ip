@@ -18,25 +18,37 @@ module processor (
     localparam SR7_ADDR = 3'b111;  // Ready flag register (1=ready, 0=busy)
     
     // Processor states
-    localparam STATE_INIT              = 4'b0000; // Initialize
-    localparam STATE_POLL_CHECK_READY  = 4'b0001; // Polling: Check if POC is ready
-    localparam STATE_POLL_SEND_DATA    = 4'b0010; // Polling: Send data
-    localparam STATE_POLL_SET_BUSY     = 4'b0011; // Polling: Set POC to busy
-    localparam STATE_POLL_WAIT         = 4'b0100; // Polling: Wait for completion
-    localparam STATE_SET_INTERRUPT     = 4'b0101; // Switch to interrupt mode
-    localparam STATE_INT_WAIT_IRQ      = 4'b0110; // Interrupt: Wait for IRQ
-    localparam STATE_INT_SEND_DATA     = 4'b0111; // Interrupt: Send data
-    localparam STATE_INT_SET_BUSY      = 4'b1000; // Interrupt: Set POC to busy
-    localparam STATE_DONE              = 4'b1001; // All done
+    localparam STATE_INIT              = 5'b00000; // Initialize
+    localparam STATE_POLL_START        = 5'b00001; // Start polling mode
+    localparam STATE_POLL_CHECK_READY  = 5'b00010; // Polling: Check if POC is ready
+    localparam STATE_POLL_PREPARE_DATA = 5'b00011; // Polling: Prepare to send data
+    localparam STATE_POLL_SEND_DATA    = 5'b00100; // Polling: Send data
+    localparam STATE_POLL_WAIT_1       = 5'b00101; // Polling: Wait cycle
+    localparam STATE_POLL_SET_BUSY     = 5'b00110; // Polling: Set POC to busy
+    localparam STATE_POLL_WAIT_2       = 5'b00111; // Polling: Wait cycle
+    localparam STATE_POLL_WAIT_DONE    = 5'b01000; // Polling: Wait for completion
+    localparam STATE_INT_START         = 5'b01001; // Start interrupt mode
+    localparam STATE_INT_WAIT_IRQ      = 5'b01010; // Interrupt: Wait for IRQ
+    localparam STATE_INT_PREPARE_DATA  = 5'b01011; // Interrupt: Prepare to send data
+    localparam STATE_INT_SEND_DATA     = 5'b01100; // Interrupt: Send data
+    localparam STATE_INT_WAIT_1        = 5'b01101; // Interrupt: Wait cycle
+    localparam STATE_INT_SET_BUSY      = 5'b01110; // Interrupt: Set POC to busy
+    localparam STATE_INT_WAIT_2        = 5'b01111; // Interrupt: Wait cycle
+    localparam STATE_DONE              = 5'b10000; // All done
     
     // Messages to print
-    reg [7:0] poll_message [0:21];  // "Hello, World! (polling)"
+    reg [7:0] poll_message [0:22];  // "Hello, World! (polling)"
     reg [7:0] int_message [0:24];   // "Hello, World! (interrupt)"
     
     // State and counter registers
-    reg [3:0] state, next_state;
+    reg [4:0] state, next_state;
     reg [5:0] char_index, next_char_index;
-    reg [1:0] delay_counter, next_delay_counter;
+    reg [19:0] delay_counter, next_delay_counter;
+    
+    // Delay constants (50MHz clock = 20ns period)
+    localparam WAIT_CYCLES_SHORT = 20'd50;     // 1us
+    localparam WAIT_CYCLES_MEDIUM = 20'd2500;  // 50us
+    localparam WAIT_CYCLES_LONG = 20'd25000;   // 500us
     
     // Initialize messages
     initial begin
@@ -93,21 +105,35 @@ module processor (
         int_message[24] = ")";
     end
     
+    // Output control registers
+    reg [7:0] next_data_out;
+    reg next_rw;
+    reg next_reg_in;
+    reg [2:0] next_addr;
+    
     // Sequential logic
     always @(posedge clk or negedge rst_n) begin
         if (~rst_n) begin
             state <= STATE_INIT;
             char_index <= 6'b0;
-            delay_counter <= 2'b0;
+            delay_counter <= 20'b0;
+            
+            // Default output values
+            data_out <= 8'b0;
             rw <= 1'b0;             // Default to read
             reg_in <= 1'b0;
             addr <= 3'b0;
-            data_out <= 8'b0;
         end
         else begin
             state <= next_state;
             char_index <= next_char_index;
             delay_counter <= next_delay_counter;
+            
+            // Update outputs
+            data_out <= next_data_out;
+            rw <= next_rw;
+            reg_in <= next_reg_in;
+            addr <= next_addr;
         end
     end
     
@@ -117,132 +143,256 @@ module processor (
         next_state = state;
         next_char_index = char_index;
         next_delay_counter = delay_counter;
-        rw = 1'b0;         // Default to read
-        reg_in = 1'b0;
-        addr = 3'b0;
-        data_out = 8'b0;
+        
+        // Default output values
+        next_data_out = data_out;
+        next_rw = 1'b0;     // Default to read
+        next_reg_in = 1'b0;
+        next_addr = addr;
         
         case (state)
             STATE_INIT: begin
-                // Initialize to polling mode (SR0 = 0)
-                rw = 1'b1;          // Write
-                addr = SR0_ADDR;    // SR0 register
-                reg_in = 1'b0;      // Set to polling mode
-                next_state = STATE_POLL_CHECK_READY;
+                // Reset all outputs to safe defaults
+                next_data_out = 8'b0;
+                next_rw = 1'b0;
+                next_reg_in = 1'b0;
+                next_addr = 3'b0;
                 next_char_index = 6'b0;
+                next_delay_counter = 20'b0;
+                
+                // Move to polling mode initialization
+                next_state = STATE_POLL_START;
+            end
+            
+            STATE_POLL_START: begin
+                // Initialize to polling mode (SR0 = 0)
+                next_rw = 1'b1;          // Write
+                next_addr = SR0_ADDR;    // SR0 register
+                next_reg_in = 1'b0;      // Set to polling mode
+                next_char_index = 6'b0;  // Reset character index
+                
+                // Add delay before checking POC status
+                next_delay_counter = WAIT_CYCLES_MEDIUM;
+                next_state = STATE_POLL_CHECK_READY;
             end
             
             STATE_POLL_CHECK_READY: begin
-                // Check if POC is ready (SR7 = 1)
-                rw = 1'b0;          // Read
-                addr = SR7_ADDR;    // SR7 register
-                
-                // Add a small delay to allow read to complete
-                if (delay_counter < 2'b11) begin
-                    next_delay_counter = delay_counter + 1'b1;
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
                 end
                 else begin
-                    next_delay_counter = 2'b0;
+                    // Check if POC is ready (SR7 = 1)
+                    next_rw = 1'b0;          // Read
+                    next_addr = SR7_ADDR;    // SR7 register
                     
-                    // If POC is ready, move to send data
+                    // Add delay for read to complete
+                    next_delay_counter = WAIT_CYCLES_SHORT;
+                    next_state = STATE_POLL_PREPARE_DATA;
+                end
+            end
+            
+            STATE_POLL_PREPARE_DATA: begin
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
+                end
+                else begin
+                    // Check result of SR7 read
                     if (reg_out == 1'b1) begin
+                        // POC is ready, prepare to send data
+                        next_data_out = poll_message[char_index];
                         next_state = STATE_POLL_SEND_DATA;
+                    end
+                    else begin
+                        // POC not ready, check again after delay
+                        next_delay_counter = WAIT_CYCLES_MEDIUM;
+                        next_state = STATE_POLL_CHECK_READY;
                     end
                 end
             end
             
             STATE_POLL_SEND_DATA: begin
                 // Send data to POC
-                rw = 1'b1;                     // Write
-                addr = DATA_ADDR;              // Data register
-                data_out = poll_message[char_index];
+                next_rw = 1'b1;                     // Write
+                next_addr = DATA_ADDR;              // Data register
+                next_data_out = poll_message[char_index];
                 
-                next_state = STATE_POLL_SET_BUSY;
+                // Add short delay for write to complete
+                next_delay_counter = WAIT_CYCLES_SHORT;
+                next_state = STATE_POLL_WAIT_1;
+            end
+            
+            STATE_POLL_WAIT_1: begin
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
+                end
+                else begin
+                    // Move to set busy state
+                    next_state = STATE_POLL_SET_BUSY;
+                end
             end
             
             STATE_POLL_SET_BUSY: begin
                 // Set POC to busy (SR7 = 0)
-                rw = 1'b1;          // Write
-                addr = SR7_ADDR;    // SR7 register
-                reg_in = 1'b0;      // Set to busy
+                next_rw = 1'b1;          // Write
+                next_addr = SR7_ADDR;    // SR7 register
+                next_reg_in = 1'b0;      // Set to busy
                 
-                next_state = STATE_POLL_WAIT;
+                // Add short delay for write to complete
+                next_delay_counter = WAIT_CYCLES_SHORT;
+                next_state = STATE_POLL_WAIT_2;
             end
             
-            STATE_POLL_WAIT: begin
-                // Check if POC is ready again (SR7 = 1)
-                rw = 1'b0;          // Read
-                addr = SR7_ADDR;    // SR7 register
-                
-                // Add a small delay to allow read to complete
-                if (delay_counter < 2'b11) begin
-                    next_delay_counter = delay_counter + 1'b1;
+            STATE_POLL_WAIT_2: begin
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
                 end
                 else begin
-                    next_delay_counter = 2'b0;
-                    
-                    // If POC is ready, move to next character or mode
+                    // Move to wait for POC ready
+                    next_delay_counter = WAIT_CYCLES_MEDIUM;
+                    next_state = STATE_POLL_WAIT_DONE;
+                end
+            end
+            
+            STATE_POLL_WAIT_DONE: begin
+                // Check if POC is ready again (SR7 = 1)
+                next_rw = 1'b0;          // Read
+                next_addr = SR7_ADDR;    // SR7 register
+                
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
+                end
+                else begin
+                    // Check if POC is ready
                     if (reg_out == 1'b1) begin
+                        // POC is ready, move to next character or mode
                         if (char_index < 22) begin
                             next_char_index = char_index + 1'b1;
+                            next_delay_counter = WAIT_CYCLES_MEDIUM;
                             next_state = STATE_POLL_CHECK_READY;
                         end
                         else begin
                             // Polling message complete, switch to interrupt mode
-                            next_state = STATE_SET_INTERRUPT;
+                            next_state = STATE_INT_START;
                             next_char_index = 6'b0;
                         end
+                    end
+                    else begin
+                        // POC not ready, check again after delay
+                        next_delay_counter = WAIT_CYCLES_MEDIUM;
                     end
                 end
             end
             
-            STATE_SET_INTERRUPT: begin
+            STATE_INT_START: begin
                 // Switch to interrupt mode (SR0 = 1)
-                rw = 1'b1;          // Write
-                addr = SR0_ADDR;    // SR0 register
-                reg_in = 1'b1;      // Set to interrupt mode
+                next_rw = 1'b1;          // Write
+                next_addr = SR0_ADDR;    // SR0 register
+                next_reg_in = 1'b1;      // Set to interrupt mode
                 
+                // Add delay to allow mode change to take effect
+                next_delay_counter = WAIT_CYCLES_MEDIUM;
                 next_state = STATE_INT_WAIT_IRQ;
             end
             
             STATE_INT_WAIT_IRQ: begin
-                // Wait for interrupt request (IRQ = 0)
-                if (irq == 1'b0) begin
-                    next_state = STATE_INT_SEND_DATA;
+                // Wait for delay to expire first
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
                 end
+                else begin
+                    // Then wait for interrupt request (IRQ = 0)
+                    if (irq == 1'b0) begin
+                        next_state = STATE_INT_PREPARE_DATA;
+                    end
+                    else begin
+                        // No interrupt yet, continue waiting
+                        next_delay_counter = WAIT_CYCLES_SHORT;
+                    end
+                end
+            end
+            
+            STATE_INT_PREPARE_DATA: begin
+                // Prepare data for interrupt mode
+                next_data_out = int_message[char_index];
+                next_state = STATE_INT_SEND_DATA;
             end
             
             STATE_INT_SEND_DATA: begin
                 // Send data to POC
-                rw = 1'b1;                     // Write
-                addr = DATA_ADDR;              // Data register
-                data_out = int_message[char_index];
+                next_rw = 1'b1;                     // Write
+                next_addr = DATA_ADDR;              // Data register
+                next_data_out = int_message[char_index];
                 
-                next_state = STATE_INT_SET_BUSY;
+                // Add short delay for write to complete
+                next_delay_counter = WAIT_CYCLES_SHORT;
+                next_state = STATE_INT_WAIT_1;
+            end
+            
+            STATE_INT_WAIT_1: begin
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
+                end
+                else begin
+                    // Move to set busy state
+                    next_state = STATE_INT_SET_BUSY;
+                end
             end
             
             STATE_INT_SET_BUSY: begin
                 // Set POC to busy (SR7 = 0)
-                rw = 1'b1;          // Write
-                addr = SR7_ADDR;    // SR7 register
-                reg_in = 1'b0;      // Set to busy
+                next_rw = 1'b1;          // Write
+                next_addr = SR7_ADDR;    // SR7 register
+                next_reg_in = 1'b0;      // Set to busy
                 
-                if (char_index < 24) begin
-                    next_char_index = char_index + 1'b1;
-                    next_state = STATE_INT_WAIT_IRQ;
+                // Add short delay for write to complete
+                next_delay_counter = WAIT_CYCLES_SHORT;
+                next_state = STATE_INT_WAIT_2;
+            end
+            
+            STATE_INT_WAIT_2: begin
+                // Wait for delay to expire
+                if (delay_counter > 0) begin
+                    next_delay_counter = delay_counter - 1'b1;
                 end
                 else begin
-                    // All done
-                    next_state = STATE_DONE;
+                    // Check if we've processed all characters
+                    if (char_index < 24) begin
+                        next_char_index = char_index + 1'b1;
+                        next_delay_counter = WAIT_CYCLES_MEDIUM;
+                        next_state = STATE_INT_WAIT_IRQ;
+                    end
+                    else begin
+                        // All done
+                        next_state = STATE_DONE;
+                    end
                 end
             end
             
             STATE_DONE: begin
                 // Stay in done state
                 next_state = STATE_DONE;
+                
+                // Reset all outputs to safe defaults
+                next_data_out = 8'b0;
+                next_rw = 1'b0;
+                next_reg_in = 1'b0;
+                next_addr = 3'b0;
             end
             
-            default: next_state = STATE_INIT;
+            default: begin
+                // In case of undefined state, return to safe state
+                next_state = STATE_INIT;
+                next_data_out = 8'b0;
+                next_rw = 1'b0;
+                next_reg_in = 1'b0;
+                next_addr = 3'b0;
+            end
         endcase
     end
     
