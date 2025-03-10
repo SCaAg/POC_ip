@@ -58,7 +58,6 @@ module poc (
             print_data <= 8'b0;
             pulse_request <= 1'b0;
             reg_out <= 1'b0;
-            next_byte_buffer <= 8'b0;
         end
         else begin
             // 更新所有寄存器
@@ -69,7 +68,6 @@ module poc (
             print_data <= next_print_data;
             pulse_request <= next_pulse_request;
             reg_out <= next_reg_out;
-            next_byte_buffer <= data_in;
         end
     end
     
@@ -80,7 +78,7 @@ module poc (
         // 默认：保持当前值
         next_state = state;
         next_status_reg = status_reg;
-        //next_byte_buffer = byte_buffer;
+        next_byte_buffer = byte_buffer;
         next_irq = irq;
         next_print_data = print_data;
         next_pulse_request = pulse_request;
@@ -112,7 +110,7 @@ module poc (
                 
                 // 如果CPU将SR7设为0(POC忙)，存储数据并准备打印
                 if (ready == POC_READY && next_status_reg[7] == POC_BUSY) begin
-                    //next_byte_buffer = data_in;
+                    next_byte_buffer = data_in;
                     next_state = STATE_DATA_RECEIVED;
                     
                     // 在中断模式下，清除中断请求
