@@ -23,7 +23,12 @@ module poc (
     localparam POC_READY = 1'b1;      // POC就绪状态 (SR7=1)
     localparam POC_BUSY = 1'b0;       // POC忙状态 (SR7=0)
     
-    // POC主状态机状态定义
+    // Register addresses
+    localparam SR0_ADDR = 3'b000;     // Mode control register
+    localparam DATA_ADDR = 3'b001;    // Data register
+    localparam SR7_ADDR = 3'b111;     // Ready flag register
+    
+   // POC主状态机状态定义
     localparam STATE_IDLE = 3'b000;           // POC空闲，等待数据
     localparam STATE_DATA_RECEIVED = 3'b001;  // 收到数据，准备打印
     localparam STATE_WAIT_PRINTER = 3'b010;   // 等待打印机就绪
@@ -88,9 +93,10 @@ module poc (
         if (rw) begin
             // CPU写操作
             case (addr)
-                3'b000: next_status_reg[0] = reg_in;  // SR0: 模式控制
-                3'b111: next_status_reg[7] = reg_in;  // SR7: 就绪标志
-                default: ; // 其他地址不用于状态寄存器
+                SR0_ADDR: next_status_reg[0] = reg_in;  // SR0: Mode control
+                DATA_ADDR: next_byte_buffer = data_in;  // Data register: Store data directly
+                SR7_ADDR: next_status_reg[7] = reg_in;  // SR7: Ready flag
+                default: ; // Other addresses not used
             endcase
         end
         else begin
@@ -110,7 +116,6 @@ module poc (
                 
                 // 如果CPU将SR7设为0(POC忙)，存储数据并准备打印
                 if (ready == POC_READY && next_status_reg[7] == POC_BUSY) begin
-                    next_byte_buffer = data_in;
                     next_state = STATE_DATA_RECEIVED;
                     
                     // 在中断模式下，清除中断请求
